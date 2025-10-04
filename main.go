@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -46,31 +47,31 @@ func subUsedBlocks(n uint64) {
 func (fsys MemoryFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
 	// Try to read MemAvailable from /proc/meminfo
 	availMem := uint64(0)
-if f, err := os.Open("/proc/meminfo"); err == nil {
-	defer f.Close()
-	buf := make([]byte, 256)
-	for {
-		n, err := f.Read(buf)
-		if n == 0 || err != nil {
-			break
-		}
-		lines := string(buf[:n])
-		for _, l := range splitLines(lines) {
-			if len(l) > 13 && l[:13] == "MemAvailable:" {
-				// Format: MemAvailable:  123456 kB
-				var kb uint64
-				_, err := fmt.Sscanf(l, "MemAvailable: %d kB", &kb)
-				if err == nil {
-					availMem = kb * 1024
+	if f, err := os.Open("/proc/meminfo"); err == nil {
+		defer f.Close()
+		buf := make([]byte, 256)
+		for {
+			n, err := f.Read(buf)
+			if n == 0 || err != nil {
+				break
+			}
+			lines := string(buf[:n])
+			for _, l := range splitLines(lines) {
+				if len(l) > 13 && l[:13] == "MemAvailable:" {
+					// Format: MemAvailable:  123456 kB
+					var kb uint64
+					_, err := fmt.Sscanf(l, "MemAvailable: %d kB", &kb)
+					if err == nil {
+						availMem = kb * 1024
+					}
+					break
 				}
+			}
+			if availMem > 0 {
 				break
 			}
 		}
-		if availMem > 0 {
-			break
-		}
 	}
-}
 	if availMem == 0 {
 		// fallback to sysinfo if /proc/meminfo fails
 		var sysinfo syscall.Sysinfo_t
@@ -115,12 +116,12 @@ func splitLines(s string) []string {
 
 func (MemoryFS) Root() (fs.Node, error) {
 	root := &Dir{
-		files: make(map[string]fs.Node), // can be *File or *Dir
-		mu:    &sync.RWMutex{},
-		mtime: time.Now(),
-		ctime: time.Now(),
-		inode: 1,
-		parent: nil,
+		files:     make(map[string]fs.Node), // can be *File or *Dir
+		mu:        &sync.RWMutex{},
+		mtime:     time.Now(),
+		ctime:     time.Now(),
+		inode:     1,
+		parent:    nil,
 		sizeDirty: true,
 	}
 	return root, nil
@@ -138,18 +139,19 @@ func nextInode() uint64 {
 }
 
 type Dir struct {
-	files map[string]fs.Node // can be *File, *Dir, *Symlink, *Socket
-	mu    *sync.RWMutex
-	uid   uint32
-	gid   uint32
-	mode  os.FileMode
-	mtime time.Time
-	ctime time.Time
-	inode uint64
-	parent *Dir // pointer to parent directory, nil for root
+	files     map[string]fs.Node // can be *File, *Dir, *Symlink, *Socket
+	mu        *sync.RWMutex
+	uid       uint32
+	gid       uint32
+	mode      os.FileMode
+	mtime     time.Time
+	ctime     time.Time
+	inode     uint64
+	parent    *Dir   // pointer to parent directory, nil for root
 	sizeCache uint64 // cache for directory size
 	sizeDirty bool   // mark if size needs recalculation
 }
+
 // Socket node
 type Socket struct {
 	uid   uint32
@@ -303,9 +305,9 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	// Check for socket creation (mknod with S_IFSOCK)
 	if req.Mode&os.ModeSocket != 0 {
 		sock := &Socket{
-			uid: req.Header.Uid,
-			gid: req.Header.Gid,
-			mode: req.Mode,
+			uid:   req.Header.Uid,
+			gid:   req.Header.Gid,
+			mode:  req.Mode,
 			ctime: now,
 			inode: nextInode(),
 		}
@@ -333,15 +335,15 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	}
 	now := time.Now()
 	dir := &Dir{
-		files: make(map[string]fs.Node),
-		mu:    &sync.RWMutex{},
-		uid:   req.Header.Uid,
-		gid:   req.Header.Gid,
-		mode:  req.Mode,
-		mtime: now,
-		ctime: now,
-		inode: nextInode(),
-		parent: d,
+		files:     make(map[string]fs.Node),
+		mu:        &sync.RWMutex{},
+		uid:       req.Header.Uid,
+		gid:       req.Header.Gid,
+		mode:      req.Mode,
+		mtime:     now,
+		ctime:     now,
+		inode:     nextInode(),
+		parent:    d,
 		sizeDirty: true,
 	}
 	d.files[req.Name] = dir
@@ -384,8 +386,8 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 		subUsedBlocks((uint64(l)+511)/512 + 7)
 	} else if symlink, ok := node.(*Symlink); ok {
 		subUsedBlocks((uint64(len(symlink.target)) + 511) / 512)
-	} else if _, ok := node.(*Socket); ok {
-		// No blocks to free for sockets
+	} else {
+		// No blocks to free for sockets or unknown node types
 	}
 	delete(d.files, req.Name)
 	d.sizeDirty = true
@@ -419,14 +421,14 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 }
 
 type File struct {
-	content []byte
-	mu      sync.RWMutex
-	uid     uint32
-	gid     uint32
-	mode    os.FileMode
-	mtime   time.Time
-	ctime   time.Time
-	inode   uint64
+	content    []byte
+	mu         sync.RWMutex
+	uid        uint32
+	gid        uint32
+	mode       os.FileMode
+	mtime      time.Time
+	ctime      time.Time
+	inode      uint64
 	blockCache uint64 // cache for block usage
 	blockDirty bool   // mark if block count needs recalculation
 }
@@ -485,7 +487,7 @@ func (f *File) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.Wri
 	f.mu.Lock()
 	oldLen := len(f.content)
 	end := int(req.Offset) + len(req.Data)
-		if end > cap(f.content) {
+	if end > cap(f.content) {
 		// Grow the slice only if needed, double the capacity for amortized O(1) appends
 		newCap := end
 		if newCap < 2*cap(f.content) {
@@ -617,9 +619,9 @@ func (d *Dir) Mknod(ctx context.Context, req *fuse.MknodRequest) (fs.Node, error
 	switch req.Mode & os.ModeType {
 	case os.ModeSocket:
 		node := &Socket{
-			uid: req.Header.Uid,
-			gid: req.Header.Gid,
-			mode: req.Mode,
+			uid:   req.Header.Uid,
+			gid:   req.Header.Gid,
+			mode:  req.Mode,
 			ctime: now,
 			inode: nextInode(),
 		}
@@ -635,6 +637,7 @@ func (d *Dir) Mknod(ctx context.Context, req *fuse.MknodRequest) (fs.Node, error
 
 func main() {
 	foreground := flag.Bool("foreground", false, "Run in foreground (do not daemonize)")
+	notifyFD := flag.Int("notify-fd", 0, "internal: write mount status to this fd (used by parent to wait for mount)")
 	flag.Parse()
 
 	// Use first positional argument as mountpoint
@@ -644,23 +647,73 @@ func main() {
 	mountPoint := flag.Arg(0)
 
 	if !*foreground {
-		// Fork and detach
+		// Fork and detach, but notify the parent only after the child has mounted the filesystem.
 		if os.Getppid() != 1 {
 			exe, err := os.Executable()
 			if err != nil {
 				os.Exit(1)
 			}
-			attr := &os.ProcAttr{
-				Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-				Env:   os.Environ(),
-			}
-			_, err = os.StartProcess(exe, append([]string{exe, "-foreground", mountPoint}, os.Args[flag.NFlag()+1:]...), attr)
+
+			// create a pipe so the child can notify the parent about mount status
+			pr, pw, err := os.Pipe()
 			if err != nil {
 				os.Exit(1)
 			}
-			os.Exit(0)
+
+			// Prepare files: child will inherit stdin/stdout/stderr and the write end of the pipe as fd3
+			files := []*os.File{os.Stdin, os.Stdout, os.Stderr, pw}
+
+			// Build args: run child in foreground mode and pass flags first so they are parsed,
+			// then the mountPoint as the positional argument. Do not append parent's extra args.
+			args := []string{exe, "-foreground", fmt.Sprintf("-notify-fd=%d", 3), mountPoint}
+
+			attr := &os.ProcAttr{
+				Files: files,
+				Env:   os.Environ(),
+			}
+
+			proc, err := os.StartProcess(exe, args, attr)
+			// close our copy of the write end; child has its own
+			pw.Close()
+			if err != nil {
+				pr.Close()
+				os.Exit(1)
+			}
+
+			// Wait for notification from child (with a timeout)
+			done := make(chan string, 1)
+			go func() {
+				buf := make([]byte, 1024)
+				n, _ := pr.Read(buf)
+				if n > 0 {
+					done <- string(buf[:n])
+				} else {
+					done <- ""
+				}
+			}()
+
+			select {
+			case msg := <-done:
+				pr.Close()
+				// If child reports OK, parent exits successfully and leaves child running
+				if strings.HasPrefix(strings.TrimSpace(msg), "OK") {
+					// parent's job is done
+					os.Exit(0)
+				}
+				// Otherwise, print child's message and exit non-zero
+				log.Printf("Child failed to mount: %s", strings.TrimSpace(msg))
+				// Try to kill child process if still running
+				_ = proc.Kill()
+				os.Exit(1)
+			case <-time.After(30 * time.Second):
+				pr.Close()
+				// Timed out waiting for child; try to clean up and exit
+				log.Println("Timed out waiting for child to mount filesystem")
+				_ = proc.Kill()
+				os.Exit(1)
+			}
 		}
-		// Redirect output to /dev/null
+		// Redirect output to /dev/null (only in the daemonized child)
 		f, _ := os.OpenFile("/dev/null", os.O_RDWR, 0)
 		os.Stdout = f
 		os.Stderr = f
@@ -677,9 +730,26 @@ func main() {
 		fuse.AsyncRead(),
 	)
 	if err != nil {
+		// If a notify fd was provided (child notifying parent), write error back before exiting
+		if *notifyFD != 0 {
+			nf := os.NewFile(uintptr(*notifyFD), "notify")
+			if nf != nil {
+				fmt.Fprintf(nf, "ERR: %v\n", err)
+				nf.Close()
+			}
+		}
 		log.Fatalf("Failed to mount: %v", err)
 	}
 	defer c.Close()
+
+	// If the parent asked to be notified (we're the child), report success so the parent can exit
+	if *notifyFD != 0 {
+		nf := os.NewFile(uintptr(*notifyFD), "notify")
+		if nf != nil {
+			fmt.Fprintln(nf, "OK")
+			nf.Close()
+		}
+	}
 
 	// If running in foreground, handle SIGINT/SIGTERM to unmount
 	if *foreground {
