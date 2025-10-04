@@ -638,7 +638,7 @@ func (d *Dir) Mknod(ctx context.Context, req *fuse.MknodRequest) (fs.Node, error
 
 func main() {
 	foreground := flag.Bool("foreground", false, "Run in foreground (do not daemonize)")
-	notifyFD := flag.Int("notify-fd", 0, "internal: write mount status to this fd (used by parent to wait for mount)")
+	notify := flag.Bool("notify", false, "internal: write mount status to fd 3 (used by parent to wait for mount)")
 	notifyTimeout := flag.Duration("notify-timeout", 30*time.Second, "how long the parent waits for child mount notification (e.g. 30s, 1m)")
 	flag.Parse()
 
@@ -667,7 +667,7 @@ func main() {
 
 			// Build args: run child in foreground mode and pass flags first so they are parsed,
 			// then the mountPoint as the positional argument. Do not append parent's extra args.
-			args := []string{exe, "-foreground", fmt.Sprintf("-notify-fd=%d", 3), mountPoint}
+			args := []string{exe, "-foreground", "-notify", mountPoint}
 
 			attr := &os.ProcAttr{
 				Files: files,
@@ -734,9 +734,9 @@ func main() {
 		fuse.AsyncRead(),
 	)
 	if err != nil {
-		// If a notify fd was provided (child notifying parent), write error back before exiting
-		if *notifyFD != 0 {
-			nf := os.NewFile(uintptr(*notifyFD), "notify")
+		// If notify is enabled (child notifying parent on fd 3), write error back before exiting
+		if *notify {
+			nf := os.NewFile(uintptr(3), "notify")
 			if nf != nil {
 				fmt.Fprintf(nf, "ERR: %v\n", err)
 				nf.Close()
@@ -747,8 +747,8 @@ func main() {
 	defer c.Close()
 
 	// If the parent asked to be notified (we're the child), report success so the parent can exit
-	if *notifyFD != 0 {
-		nf := os.NewFile(uintptr(*notifyFD), "notify")
+	if *notify {
+		nf := os.NewFile(uintptr(3), "notify")
 		if nf != nil {
 			fmt.Fprintln(nf, "OK")
 			nf.Close()
