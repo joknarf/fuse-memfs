@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -638,6 +639,7 @@ func (d *Dir) Mknod(ctx context.Context, req *fuse.MknodRequest) (fs.Node, error
 func main() {
 	foreground := flag.Bool("foreground", false, "Run in foreground (do not daemonize)")
 	notifyFD := flag.Int("notify-fd", 0, "internal: write mount status to this fd (used by parent to wait for mount)")
+	notifyTimeout := flag.Duration("notify-timeout", 30*time.Second, "how long the parent waits for child mount notification (e.g. 30s, 1m)")
 	flag.Parse()
 
 	// Use first positional argument as mountpoint
@@ -680,16 +682,18 @@ func main() {
 				os.Exit(1)
 			}
 
-			// Wait for notification from child (with a timeout)
+			// Wait for a single newline-terminated message from child (with a timeout)
 			done := make(chan string, 1)
 			go func() {
-				buf := make([]byte, 1024)
-				n, _ := pr.Read(buf)
-				if n > 0 {
-					done <- string(buf[:n])
-				} else {
-					done <- ""
+				// use a buffered reader to read until newline
+				r := bufio.NewReader(pr)
+				line, err := r.ReadString('\n')
+				if err != nil {
+					// send whatever we got (possibly empty)
+					done <- line
+					return
 				}
+				done <- line
 			}()
 
 			select {
@@ -705,7 +709,7 @@ func main() {
 				// Try to kill child process if still running
 				_ = proc.Kill()
 				os.Exit(1)
-			case <-time.After(30 * time.Second):
+			case <-time.After(*notifyTimeout):
 				pr.Close()
 				// Timed out waiting for child; try to clean up and exit
 				log.Println("Timed out waiting for child to mount filesystem")
