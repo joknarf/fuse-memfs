@@ -651,10 +651,7 @@ func main() {
 	if !*foreground {
 		// Fork and detach, but notify the parent only after the child has mounted the filesystem.
 		if os.Getppid() != 1 {
-			exe, err := os.Executable()
-			if err != nil {
-				os.Exit(1)
-			}
+			exe := os.Args[0]
 
 			// create a pipe so the child can notify the parent about mount status
 			pr, pw, err := os.Pipe()
